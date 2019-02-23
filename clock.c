@@ -276,4 +276,3 @@ double get_comp_counter()
     */
     return ctime;
 }
-
