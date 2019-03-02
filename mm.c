@@ -20,7 +20,7 @@
 /* Basic constants and macros */
 #define WSIZE       4       /* Word and header/footer size (bytes) */ //line:vm:mm:beginconst
 #define DSIZE       8       /* Double word size (bytes) */
-#define CHUNKSIZE  (1<<12)  /* Extend heap by this amount (bytes) */  //line:vm:mm:endconst 
+#define CHUNKSIZE  (1<<12)  /* The size of the initial free block and the default size for expanding the heap, Extend heap by this amount (bytes) */  //line:vm:mm:endconst 
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
 
@@ -32,8 +32,8 @@
 #define PUT(p, val)  (*(unsigned int *)(p) = (val))    //line:vm:mm:put
 
 /* Read the size and allocated fields from address p */
-#define GET_SIZE(p)  (GET(p) & ~0x7)                   //line:vm:mm:getsize
-#define GET_ALLOC(p) (GET(p) & 0x1)                    //line:vm:mm:getalloc
+#define GET_SIZE(p)  (GET(p) & ~0x7) /*~(0...0111)*/                   //line:vm:mm:getsize
+#define GET_ALLOC(p) (GET(p) & 0x1)                                    //line:vm:mm:getalloc
 
 /* Given block ptr bp, compute address of its header and footer */
 #define HDRP(bp)       ((char *)(bp) - WSIZE)                      //line:vm:mm:hdrp
@@ -59,6 +59,26 @@ static void printblock(void *bp);
 static void checkheap(int verbose);
 static void checkblock(void *bp);
 
+
+/*myMacros */
+/*Pointer to get NEXT and PREVIOUS pointer of free_list*/
+#define NEXT_PTR(p)  (*(char **)(p + WSIZE))
+#define PREV_PTR(p)  (*(char **)(p))
+
+
+/* myVariables */
+// Pointer pointing to starting of explicit free list
+static char* freeListPtr=0;
+
+/* myMethods */
+// Function prototypes for next_fit and best_fit
+//static void *next_fit(size_t asize);
+//static void *best_fit(size_t asize);
+
+// Functions prototypes for adding and deleting free memory blocks in free_list
+static void free_list_add(void* ptr);
+static void free_list_delete(void* ptr);
+
 /* 
  * mm_init - Initialize the memory manager 
  */
@@ -73,6 +93,9 @@ int mm_init(void)
     PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); /* Prologue footer */ 
     PUT(heap_listp + (3*WSIZE), PACK(0, 1));     /* Epilogue header */
     heap_listp += (2*WSIZE);                     //line:vm:mm:endinit  
+
+    // Initialize freeListPtr to point to starting of free memory in heap
+	freeListPtr=heap_listp;
     /* $end mminit */
 
 #ifdef NEXT_FIT
@@ -81,7 +104,7 @@ int mm_init(void)
     /* $begin mminit */
 
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
-    if (extend_heap(CHUNKSIZE/WSIZE) == NULL) 
+    if (extend_heap(CHUNKSIZE/WSIZE) == NULL) /*Cannot extend the heap*/
         return -1;
     return 0;
 }
@@ -120,12 +143,81 @@ void *mm_malloc(size_t size)
 
     /* No fit found. Get more memory and place the block */
     extendsize = MAX(asize,CHUNKSIZE);                 //line:vm:mm:growheap1
-    if ((bp = extend_heap(extendsize/WSIZE)) == NULL)  
+    if ((bp = extend_heap(extendsize/WSIZE)) == NULL)  /*extended heap*/
         return NULL;                                  //line:vm:mm:growheap2
     place(bp, asize);                                 //line:vm:mm:growheap3
     return bp;
 } 
 /* $end mmmalloc */
+
+/* 
+ * place - Place block of asize bytes at start of free block bp 
+ *         and split if remainder would be at least minimum block size
+ */
+/* $begin mmplace */
+/* $begin mmplace-proto */
+static void place(void *bp, size_t asize)
+/* $end mmplace-proto */
+{
+    size_t csize = GET_SIZE(HDRP(bp));   
+
+    if ((csize - asize) >= (2*DSIZE)) { 
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+        free_list_delete(bp);						// free block is deleted from free_list
+        bp = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(csize-asize, 0));
+        PUT(FTRP(bp), PACK(csize-asize, 0));
+    }
+    else { 
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
+        free_list_delete(bp);						// free block is deleted from free_list
+    }
+}
+/* $end mmplace */
+
+/* 
+ * find_fit - Find a fit for a block with asize bytes 
+ */
+/* $begin mmfirstfit */
+/* $begin mmfirstfit-proto */
+static void *find_fit(size_t asize)
+/* $end mmfirstfit-proto */
+{
+    /* $end mmfirstfit */
+
+#ifdef NEXT_FIT 
+    /* Next fit search */
+    char *oldrover = rover;
+
+    /* Search from the rover to the end of list */
+    for ( ; GET_SIZE(HDRP(rover)) > 0; rover = NEXT_BLKP(rover))
+        if (!GET_ALLOC(HDRP(rover)) && (asize <= GET_SIZE(HDRP(rover))))
+            return rover;
+
+    /* search from start of list to old rover */
+    for (rover = heap_listp; rover < oldrover; rover = NEXT_BLKP(rover))
+        if (!GET_ALLOC(HDRP(rover)) && (asize <= GET_SIZE(HDRP(rover))))
+            return rover;
+
+    return NULL;  /* no fit found */
+#else 
+    /* $begin mmfirstfit */
+    /* First-fit search */
+    void *bp;
+
+    //for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) { /*start block pointer at 0 to the end where block size = -1*/
+    for (bp = freeListPtr; GET_ALLOC(HDRP(bp)) == 0; bp = NEXT_BLKP(bp)) { /*start block pointer from the first free block  to the end where allocated bit != 0 (Not free)*/ 
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {  /*If allocated bit is 0 and asize <= the block size*/
+            return bp;
+        }
+    }
+    return NULL; /* No fit */
+#endif
+}
+/* $end mmfirstfit */
+
 
 /* 
  * mm_free - Free a block 
@@ -160,31 +252,36 @@ static void *coalesce(void *bp)
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
     size_t size = GET_SIZE(HDRP(bp));
-
-    if (prev_alloc && next_alloc) {            /* Case 1 */
+    /*previous block size = m1, current block size = n, next block size = m2*/
+    if (prev_alloc && next_alloc) {            /* Case 1 previous allocated bit = next allocated bit  = 1 */
+        free_list_add(bp);					   // adding free block in free_list
         return bp;
     }
 
-    else if (prev_alloc && !next_alloc) {      /* Case 2 */
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        PUT(HDRP(bp), PACK(size, 0));
-        PUT(FTRP(bp), PACK(size,0));
+    else if (prev_alloc && !next_alloc) {      /* Case 2 next allocated bit = 0, so the next block is free*/
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp))); /*current_block_size = current_block_size + next_block_size   || size = n+m2*/
+        PUT(HDRP(bp), PACK(size, 0));          /*the current block header size = n+m2, the current block header allocated bit = 0 (free)*/
+        PUT(FTRP(bp), PACK(size,0));           /*the current block footer size = n+m2, the current block footer allocated bit =  0 (free)*/
+        free_list_delete(NEXT_BLKP(bp));	   // next free block is deleted from free_list
     }
 
-    else if (!prev_alloc && next_alloc) {      /* Case 3 */
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-        PUT(FTRP(bp), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);
+    else if (!prev_alloc && next_alloc) {         /* Case 3 previuos  allocated bit = 0, so the previous block is free*/
+        size += GET_SIZE(HDRP(PREV_BLKP(bp)));    /*size = n+m1*/
+        PUT(FTRP(bp), PACK(size, 0));             /*the current block footer size = n+m1, the current block footer allocated bit  = 0 (free)*/
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));  /*the previous block header size = n+m1, the previous block header allocated bit = 0 (free)*/
+        bp = PREV_BLKP(bp);                       /*Move pointer to the initial previous block address*/
+        free_list_delete(PREV_BLKP(bp));		  // previous free block is deleted from free_list
     }
 
-    else {                                     /* Case 4 */
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + 
-            GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);
+    else {                                         /* Case 4 previous allocated bit = next allocated bit =  0, both block are free*/
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp))); /*size = n+m1+m2*/
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));    /*the previous block header size = n+m1+m2, the previous block header allocated bit = 0 (free)*/
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));    /*the next block footer size = n+m1+m2, the next block footer allocated bit = 0 (free)*/
+        bp = PREV_BLKP(bp);                          /*Move pointer to the initial previous block address*/
+        free_list_delete(PREV_BLKP(bp));			// both free blocks are deleted from free_list
+		free_list_delete(NEXT_BLKP(bp));
     }
+    free_list_add(bp);								// add newly coalesced block to free_list
     /* $end mmfree */
 #ifdef NEXT_FIT
     /* Make sure the rover isn't pointing into the free block */
@@ -196,6 +293,24 @@ static void *coalesce(void *bp)
     return bp;
 }
 /* $end mmfree */
+
+
+// adds free block pointed by ptr to the free_list
+static void free_list_add(void* ptr){
+	NEXT_PTR(ptr)=freeListPtr;
+	PREV_PTR(freeListPtr)=ptr;
+	PREV_PTR(ptr)=NULL;
+	freeListPtr=ptr;
+}
+
+// deletes free block pointed by ptr to the free_list
+static void free_list_delete(void* ptr){
+	if(PREV_PTR(ptr)==NULL)						//if ptr points to root of free_list
+		freeListPtr=NEXT_PTR(ptr);
+	else										//if ptr points to any arbitary block in free_list 
+		NEXT_PTR(PREV_PTR(ptr))=NEXT_PTR(ptr);
+	PREV_PTR(NEXT_PTR(ptr))=PREV_PTR(ptr);
+}
 
 /*
  * mm_realloc - Naive implementation of realloc
@@ -269,72 +384,6 @@ static void *extend_heap(size_t words)
     return coalesce(bp);                                          //line:vm:mm:returnblock
 }
 /* $end mmextendheap */
-
-/* 
- * place - Place block of asize bytes at start of free block bp 
- *         and split if remainder would be at least minimum block size
- */
-/* $begin mmplace */
-/* $begin mmplace-proto */
-static void place(void *bp, size_t asize)
-/* $end mmplace-proto */
-{
-    size_t csize = GET_SIZE(HDRP(bp));   
-
-    if ((csize - asize) >= (2*DSIZE)) { 
-        PUT(HDRP(bp), PACK(asize, 1));
-        PUT(FTRP(bp), PACK(asize, 1));
-        bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(csize-asize, 0));
-        PUT(FTRP(bp), PACK(csize-asize, 0));
-    }
-    else { 
-        PUT(HDRP(bp), PACK(csize, 1));
-        PUT(FTRP(bp), PACK(csize, 1));
-    }
-}
-/* $end mmplace */
-
-/* 
- * find_fit - Find a fit for a block with asize bytes 
- */
-/* $begin mmfirstfit */
-/* $begin mmfirstfit-proto */
-static void *find_fit(size_t asize)
-/* $end mmfirstfit-proto */
-{
-    /* $end mmfirstfit */
-
-#ifdef NEXT_FIT 
-    /* Next fit search */
-    char *oldrover = rover;
-
-    /* Search from the rover to the end of list */
-    for ( ; GET_SIZE(HDRP(rover)) > 0; rover = NEXT_BLKP(rover))
-        if (!GET_ALLOC(HDRP(rover)) && (asize <= GET_SIZE(HDRP(rover))))
-            return rover;
-
-    /* search from start of list to old rover */
-    for (rover = heap_listp; rover < oldrover; rover = NEXT_BLKP(rover))
-        if (!GET_ALLOC(HDRP(rover)) && (asize <= GET_SIZE(HDRP(rover))))
-            return rover;
-
-    return NULL;  /* no fit found */
-#else 
-    /* $begin mmfirstfit */
-    /* First-fit search */
-    void *bp;
-
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
-            return bp;
-        }
-    }
-    return NULL; /* No fit */
-#endif
-}
-/* $end mmfirstfit */
-
 static void printblock(void *bp) 
 {
     size_t hsize, halloc, fsize, falloc;
